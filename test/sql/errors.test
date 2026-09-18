@@ -29,3 +29,10 @@ statement error
 SELECT * FROM read_dbn_trades('test/data/nonexistent_*.dbn')
 ----
 dbn: no files match
+
+# A schema-specific reader rejects schema-bearing input from a different
+# family instead of silently returning zero rows.
+statement error
+SELECT * FROM read_dbn_mbo('test/data/test_data.trades.dbn')
+----
+has schema 'trades', but read_dbn_mbo reads 'mbo'

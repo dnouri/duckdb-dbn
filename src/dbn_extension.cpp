@@ -21,6 +21,7 @@
 
 #include <memory>
 #include <array>
+#include <initializer_list>
 #include <limits>
 #include <utility>
 
@@ -521,6 +522,44 @@ static std::vector<std::string> ExpandPaths(ClientContext &context, const std::s
 	return paths;
 }
 
+static const char *SchemaToCstr(databento::Schema s); // defined below the schema handlers
+
+// Fail fast at bind time when a specific read_dbn_<schema>() reader is pointed
+// at a file whose metadata.schema belongs to a different schema family.
+// Files with no schema in metadata (DBN v1/v2, live or mixed-schema captures)
+// keep the permissive behavior required for explicit schema readers.
+static void VerifySchema(const std::vector<std::string> &paths, std::initializer_list<databento::Schema> allowed,
+                         const char *reader) {
+	for (const auto &path : paths) {
+		duckdb_dbn::DbnFileReader probe(path);
+		const auto &md = probe.GetMetadata();
+		if (!md.schema.has_value()) {
+			continue;
+		}
+		bool ok = false;
+		std::string allowed_str;
+		for (const auto schema : allowed) {
+			if (!allowed_str.empty()) {
+				allowed_str += "/";
+			}
+			allowed_str += SchemaToCstr(schema);
+			ok = ok || schema == *md.schema;
+		}
+		if (!ok) {
+			throw InvalidInputException("dbn: file '%s' has schema '%s', but %s reads '%s' — use "
+			                            "read_dbn('%s') or the matching read_dbn_<schema>() reader",
+			                            path, SchemaToCstr(*md.schema), reader, allowed_str, path);
+		}
+	}
+}
+
+static std::vector<std::string> BindPaths(ClientContext &context, TableFunctionBindInput &input,
+                                          std::initializer_list<databento::Schema> allowed, const char *reader) {
+	auto paths = ExpandPaths(context, GetFilePathArg(input));
+	VerifySchema(paths, allowed, reader);
+	return paths;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shorthand for the per-row int64 timestamp extraction.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -571,7 +610,7 @@ static inline void EmitTsOptV(Vector &vec, idx_t n, databento::UnixNanos t) {
 static unique_ptr<FunctionData> TradesBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Trades}, "read_dbn_trades");
 	names = {"ts_event", "ts_recv", "instrument_id", "publisher_id", "price",       "size",
 	         "action",   "side",    "flags",         "depth",        "ts_in_delta", "sequence"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT,
@@ -739,7 +778,7 @@ static void TradesScan(ClientContext &, TableFunctionInput &input, DataChunk &ou
 static unique_ptr<FunctionData> MboBind(ClientContext &context, TableFunctionBindInput &input,
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Mbo}, "read_dbn_mbo");
 	names = {"ts_event", "ts_recv",    "instrument_id", "publisher_id", "order_id",    "price",   "size",
 	         "flags",    "channel_id", "action",        "side",         "ts_in_delta", "sequence"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT,
@@ -898,7 +937,8 @@ static void MboScan(ClientContext &, TableFunctionInput &input, DataChunk &out) 
 static unique_ptr<FunctionData> Mbp1Bind(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Mbp1, databento::Schema::Tbbo},
+	                           "read_dbn_mbp1/read_dbn_tbbo");
 	names = {"ts_event", "ts_recv", "instrument_id", "publisher_id", "bid_price", "ask_price", "bid_size", "ask_size",
 	         "bid_ct",   "ask_ct",  "flags",         "ts_in_delta",  "sequence",  "action",    "side"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT,
@@ -1093,7 +1133,7 @@ static std::string LevelCol(const char *prefix, int i) {
 static unique_ptr<FunctionData> Mbp10Bind(ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Mbp10}, "read_dbn_mbp10");
 	names = {"ts_event", "ts_recv", "instrument_id", "publisher_id", "price",       "size",
 	         "action",   "side",    "flags",         "depth",        "ts_in_delta", "sequence"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT,
@@ -1306,7 +1346,8 @@ static void Mbp10Scan(ClientContext &, TableFunctionInput &input, DataChunk &out
 static unique_ptr<FunctionData> BboBind(ClientContext &context, TableFunctionBindInput &input,
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Bbo1S, databento::Schema::Bbo1M},
+	                           "read_dbn_bbo_1s/read_dbn_bbo_1m");
 	names = {"ts_event",  "ts_recv",   "instrument_id", "publisher_id", "price",  "size",   "side",    "flags",
 	         "bid_price", "ask_price", "bid_size",      "ask_size",     "bid_ct", "ask_ct", "sequence"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT,
@@ -1484,7 +1525,8 @@ static void Bbo1mScan(ClientContext &c, TableFunctionInput &input, DataChunk &ou
 static unique_ptr<FunctionData> CbboBind(ClientContext &context, TableFunctionBindInput &input,
                                          vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Cbbo1S, databento::Schema::Cbbo1M},
+	                           "read_dbn_cbbo_1s/read_dbn_cbbo_1m");
 	names = {"ts_event", "ts_recv",   "instrument_id", "publisher_id", "price",    "size",   "side",
 	         "flags",    "bid_price", "ask_price",     "bid_size",     "ask_size", "bid_pb", "ask_pb"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT,
@@ -1655,7 +1697,8 @@ static void Cbbo1mScan(ClientContext &c, TableFunctionInput &input, DataChunk &o
 static unique_ptr<FunctionData> Cmbp1Bind(ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Cmbp1, databento::Schema::Tcbbo},
+	                           "read_dbn_cmbp1/read_dbn_tcbbo");
 	names = {"ts_event", "ts_recv",     "instrument_id", "publisher_id", "price",    "size",     "action", "side",
 	         "flags",    "ts_in_delta", "bid_price",     "ask_price",    "bid_size", "ask_size", "bid_pb", "ask_pb"};
 	return_types = {
@@ -1844,7 +1887,11 @@ static void TcbboScan(ClientContext &c, TableFunctionInput &input, DataChunk &ou
 static unique_ptr<FunctionData> OhlcvBind(ClientContext &context, TableFunctionBindInput &input,
                                           vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input,
+	                           {databento::Schema::Ohlcv1S, databento::Schema::Ohlcv1M,
+	                            databento::Schema::Ohlcv1H, databento::Schema::Ohlcv1D,
+	                            databento::Schema::OhlcvEod},
+	                           "read_dbn_ohlcv_*");
 	bd->header_layout = kHeaderLayoutOhlcv;
 	names = {"ts_event", "instrument_id", "publisher_id", "open", "high", "low", "close", "volume"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT, LogicalType::DOUBLE,
@@ -1979,7 +2026,7 @@ static void OhlcvEodScan(ClientContext &c, TableFunctionInput &i, DataChunk &o) 
 static unique_ptr<FunctionData> StatusBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Status}, "read_dbn_status");
 	names = {"ts_event", "ts_recv",       "instrument_id", "publisher_id", "action",
 	         "reason",   "trading_event", "is_trading",    "is_quoting",   "is_short_sell_restricted"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER,
@@ -2112,7 +2159,7 @@ static void StatusScan(ClientContext &, TableFunctionInput &input, DataChunk &ou
 static unique_ptr<FunctionData> ImbalanceBind(ClientContext &context, TableFunctionBindInput &input,
                                               vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Imbalance}, "read_dbn_imbalance");
 	names = {"ts_event",
 	         "ts_recv",
 	         "instrument_id",
@@ -2364,7 +2411,7 @@ static void ImbalanceScan(ClientContext &, TableFunctionInput &input, DataChunk 
 static unique_ptr<FunctionData> StatisticsBind(ClientContext &context, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Statistics}, "read_dbn_statistics");
 	bd->header_layout = DbnHeaderColumnLayout {0, 3, 4};
 	names = {"ts_event", "ts_recv",     "ts_ref",    "instrument_id", "publisher_id",  "price",     "quantity",
 	         "sequence", "ts_in_delta", "stat_type", "channel_id",    "update_action", "stat_flags"};
@@ -2597,7 +2644,7 @@ static void StatisticsScan(ClientContext &, TableFunctionInput &input, DataChunk
 static unique_ptr<FunctionData> DefinitionBind(ClientContext &context, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = BindPaths(context, input, {databento::Schema::Definition}, "read_dbn_definition");
 	names = {"ts_event",
 	         "ts_recv",
 	         "instrument_id",

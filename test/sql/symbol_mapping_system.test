@@ -85,15 +85,16 @@ WHERE code = 'heartbeat'
 1
 
 # ──────────────────────────────────────────────────────────────────────────
-# Cross-reader sanity — the market-data readers correctly skip these rtypes
-# (the live-stream behavior we depend on). A market-data reader pointed at
-# a symbol_mapping-only file should return zero rows.
+# Cross-reader sanity. The fixture advertises MBO in metadata, so a trades
+# reader rejects it before scanning even though its body contains only mapping
+# records. The generic mapping reader remains rtype-driven and returns no rows
+# from a trades-only file.
 # ──────────────────────────────────────────────────────────────────────────
 
-query I
+statement error
 SELECT count(*) FROM read_dbn_trades('test/data/test_data.symbol_mapping.dbn')
 ----
-0
+has schema 'mbo', but read_dbn_trades reads 'trades'
 
 query I
 SELECT count(*) FROM read_dbn_symbol_mapping('test/data/test_data.trades.dbn')
