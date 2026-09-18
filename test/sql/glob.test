@@ -17,12 +17,37 @@ SELECT count(*) FROM read_dbn_trades('test/data/glob_trades_*.dbn');
 ----
 4
 
-# Polymorphic read_dbn() accepts globs and dispatches based on the first
-# matched file's schema.
+# An explicit VARCHAR[] concatenates files in list order.
+query I
+SELECT count(*)
+FROM read_dbn_trades([
+    'test/data/glob_trades_a.dbn',
+    'test/data/glob_trades_b.dbn'
+]);
+----
+4
+
+# Polymorphic read_dbn() accepts globs and path lists and dispatches based on
+# the first matched file's schema.
 query I
 SELECT count(*) FROM read_dbn('test/data/glob_trades_*.dbn');
 ----
 4
+
+query I
+SELECT count(*)
+FROM read_dbn([
+    'test/data/glob_trades_a.dbn',
+    'test/data/glob_trades_b.dbn'
+]);
+----
+4
+
+# Empty lists are rejected clearly.
+statement error
+SELECT * FROM read_dbn_trades([]::VARCHAR[]);
+----
+path list argument is empty
 
 # Non-matching pattern throws.
 statement error

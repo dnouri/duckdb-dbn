@@ -502,22 +502,38 @@ static unique_ptr<GlobalTableFunctionState> ReadDbnInitGlobal(ClientContext &, T
 	return std::move(gs);
 }
 
-static std::string GetFilePathArg(TableFunctionBindInput &input) {
-	return input.inputs[0].GetValue<string>();
+// Path argument: a single VARCHAR (literal path or glob pattern), or a
+// VARCHAR[] list of them. Patterns are glob-expanded and concatenated in
+// order; the reader enforces schema/version/ts_out consistency on open.
+static std::vector<std::string> GetPathsArg(TableFunctionBindInput &input) {
+	const Value &value = input.inputs[0];
+	std::vector<std::string> patterns;
+	if (value.type().id() == LogicalTypeId::LIST) {
+		for (const auto &element : ListValue::GetChildren(value)) {
+			patterns.push_back(element.ToString());
+		}
+		if (patterns.empty()) {
+			throw InvalidInputException("dbn: path list argument is empty");
+		}
+	} else {
+		patterns.push_back(value.GetValue<string>());
+	}
+	return patterns;
 }
 
-// Expand a glob (or literal path) into a list of files. Throws if no file
-// matches the pattern.
-static std::vector<std::string> ExpandPaths(ClientContext &context, const std::string &pattern) {
+// Expand glob patterns (or literal paths) into one ordered list of files.
+// Throws if no file matches any pattern.
+static std::vector<std::string> ExpandPaths(ClientContext &context, const std::vector<std::string> &patterns) {
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto opens = fs.Glob(pattern);
 	std::vector<std::string> paths;
-	paths.reserve(opens.size());
-	for (const auto &of : opens) {
-		paths.push_back(of.path);
+	for (const auto &pattern : patterns) {
+		auto opens = fs.Glob(pattern);
+		for (const auto &open_file : opens) {
+			paths.push_back(open_file.path);
+		}
 	}
 	if (paths.empty()) {
-		throw IOException("dbn: no files match: " + pattern);
+		throw IOException("dbn: no files match: " + patterns.front());
 	}
 	return paths;
 }
@@ -555,7 +571,7 @@ static void VerifySchema(const std::vector<std::string> &paths, std::initializer
 
 static std::vector<std::string> BindPaths(ClientContext &context, TableFunctionBindInput &input,
                                           std::initializer_list<databento::Schema> allowed, const char *reader) {
-	auto paths = ExpandPaths(context, GetFilePathArg(input));
+	auto paths = ExpandPaths(context, GetPathsArg(input));
 	VerifySchema(paths, allowed, reader);
 	return paths;
 }
@@ -3771,7 +3787,7 @@ static const char *SystemCodeToCstr(databento::SystemCode c) {
 static unique_ptr<FunctionData> SymbolMappingBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = ExpandPaths(context, GetPathsArg(input));
 	bd->header_layout = kHeaderLayoutOhlcv;
 	names = {"ts_event",  "instrument_id",    "publisher_id", "stype_in", "stype_in_symbol",
 	         "stype_out", "stype_out_symbol", "start_ts",     "end_ts"};
@@ -3958,7 +3974,7 @@ static void SymbolMappingScan(ClientContext &, TableFunctionInput &input, DataCh
 static unique_ptr<FunctionData> SystemBind(ClientContext &context, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<ReadDbnBindData>();
-	bd->file_paths = ExpandPaths(context, GetFilePathArg(input));
+	bd->file_paths = ExpandPaths(context, GetPathsArg(input));
 	bd->header_layout = kHeaderLayoutOhlcv;
 	names = {"ts_event", "instrument_id", "publisher_id", "msg", "code"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::UINTEGER, LogicalType::USMALLINT, LogicalType::VARCHAR,
@@ -4105,8 +4121,7 @@ struct ReadDbnBindDataPolymorphic : public ReadDbnBindData {
 
 static unique_ptr<FunctionData> ReadDbnBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<string> &names) {
-	const auto pattern = GetFilePathArg(input);
-	auto paths = ExpandPaths(context, pattern);
+	auto paths = ExpandPaths(context, GetPathsArg(input));
 	duckdb_dbn::DbnFileReader probe(paths.front());
 	const auto &md = probe.GetMetadata();
 	if (!md.schema.has_value()) {
@@ -4167,7 +4182,7 @@ struct DbnMetadataGlobalState : public GlobalTableFunctionState {
 static unique_ptr<FunctionData> DbnMetadataBind(ClientContext &, TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<DbnMetadataBindData>();
-	bd->file_path = GetFilePathArg(input);
+	bd->file_path = GetPathsArg(input).front();
 	names = {"version", "dataset",  "schema",    "start_ts", "end_ts",
 	         "limit",   "stype_in", "stype_out", "ts_out",   "symbol_cstr_len"};
 	return_types = {LogicalType::UTINYINT,     LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::TIMESTAMP_NS,
@@ -4247,7 +4262,7 @@ struct DbnRecordsGlobalState : public GlobalTableFunctionState {
 static unique_ptr<FunctionData> DbnRecordsBind(ClientContext &, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<string> &names) {
 	auto bd = make_uniq<DbnRecordsBindData>();
-	bd->file_path = GetFilePathArg(input);
+	bd->file_path = GetPathsArg(input).front();
 	names = {"ts_event", "rtype", "length", "publisher_id", "instrument_id", "body"};
 	return_types = {LogicalType::TIMESTAMP_NS, LogicalType::UTINYINT, LogicalType::UTINYINT,
 	                LogicalType::USMALLINT,    LogicalType::UINTEGER, LogicalType::BLOB};
@@ -4465,6 +4480,11 @@ static void Register(ExtensionLoader &loader, const char *name, table_function_b
 	f.projection_pushdown = true;
 	f.filter_pushdown = true;
 	loader.RegisterFunction(f);
+	TableFunction list_function(name, {LogicalType::LIST(LogicalType::VARCHAR)}, ScanWithBodyFilter<Inner>, bind,
+	                            ReadDbnInitGlobal);
+	list_function.projection_pushdown = true;
+	list_function.filter_pushdown = true;
+	loader.RegisterFunction(list_function);
 }
 
 // Bind wrapper that adds opt-in symbol resolution to a market-data reader.
@@ -4490,6 +4510,12 @@ static void RegisterWithSymbols(ExtensionLoader &loader, const char *name) {
 	f.filter_pushdown = true;
 	f.named_parameters["symbols"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(f);
+	TableFunction list_function(name, {LogicalType::LIST(LogicalType::VARCHAR)}, ScanWithBodyFilter<Inner>,
+	                            BindWithSymbols<Bind>, ReadDbnInitGlobal);
+	list_function.projection_pushdown = true;
+	list_function.filter_pushdown = true;
+	list_function.named_parameters["symbols"] = LogicalType::BOOLEAN;
+	loader.RegisterFunction(list_function);
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -4504,6 +4530,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 		f.filter_pushdown = true;
 		f.named_parameters["symbols"] = LogicalType::BOOLEAN;
 		loader.RegisterFunction(f);
+		TableFunction list_function("read_dbn", {LogicalType::LIST(LogicalType::VARCHAR)},
+		                            ScanWithBodyFilter<ReadDbnScan>, ReadDbnBind, ReadDbnInitGlobal);
+		list_function.projection_pushdown = true;
+		list_function.filter_pushdown = true;
+		list_function.named_parameters["symbols"] = LogicalType::BOOLEAN;
+		loader.RegisterFunction(list_function);
 	}
 	RegisterWithSymbols<TradesScan, TradesBind>(loader, "read_dbn_trades");
 	RegisterWithSymbols<MboScan, MboBind>(loader, "read_dbn_mbo");
