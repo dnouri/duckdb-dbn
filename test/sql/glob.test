@@ -10,38 +10,66 @@ SELECT count(*) FROM read_dbn_trades('test/data/test_data.trades.dbn');
 ----
 2
 
-# Multi-file glob: two identical-content files matched by glob_trades_*.dbn.
-# Each has 2 rows; total = 4. Rows concatenate file-by-file in order.
-query I
-SELECT count(*) FROM read_dbn_trades('test/data/glob_trades_*.dbn');
+# Multi-file glob: the `a` fixture has prices 3720.25, while `b` has
+# 3721.25/3721.50. Rows concatenate file-by-file in glob order.
+query RI
+SELECT price, size
+FROM read_dbn_trades('test/data/glob_trades_*.dbn');
 ----
-4
+3720.25	5
+3720.25	21
+3721.25	5
+3721.5	21
 
 # An explicit VARCHAR[] concatenates files in list order.
-query I
-SELECT count(*)
+query RI
+SELECT price, size
 FROM read_dbn_trades([
     'test/data/glob_trades_a.dbn',
     'test/data/glob_trades_b.dbn'
 ]);
 ----
-4
+3720.25	5
+3720.25	21
+3721.25	5
+3721.5	21
+
+# Reversing the list reverses the file groups without changing record order
+# inside either file.
+query RI
+SELECT price, size
+FROM read_dbn_trades([
+    'test/data/glob_trades_b.dbn',
+    'test/data/glob_trades_a.dbn'
+]);
+----
+3721.25	5
+3721.5	21
+3720.25	5
+3720.25	21
 
 # Polymorphic read_dbn() accepts globs and path lists and dispatches based on
-# the first matched file's schema.
-query I
-SELECT count(*) FROM read_dbn('test/data/glob_trades_*.dbn');
+# the first matched file's schema, with the same deterministic concatenation.
+query RI
+SELECT price, size
+FROM read_dbn('test/data/glob_trades_*.dbn');
 ----
-4
+3720.25	5
+3720.25	21
+3721.25	5
+3721.5	21
 
-query I
-SELECT count(*)
+query RI
+SELECT price, size
 FROM read_dbn([
     'test/data/glob_trades_a.dbn',
     'test/data/glob_trades_b.dbn'
 ]);
 ----
-4
+3720.25	5
+3720.25	21
+3721.25	5
+3721.5	21
 
 # Empty lists are rejected clearly.
 statement error
