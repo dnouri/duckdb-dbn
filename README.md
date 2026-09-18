@@ -42,7 +42,12 @@ glob of them) and query it. Decoding is verified **bit-identical to the official
 ## Function reference
 
 Every reader takes a file path (or glob) as its first argument and returns the
-schema's records as rows.
+schema's records as rows. A `VARCHAR[]` list of paths/globs is also accepted
+(read in order; all files must share schema, version, and `ts_out`). A specific
+`read_dbn_<schema>()` reader pointed at a file whose `metadata.schema` belongs
+to a different schema family fails at bind time with a clear error instead of
+silently returning 0 rows (files without a schema in metadata — DBN v1/v2,
+live/mixed captures — are not gated).
 
 | Function | DBN schema |
 |---|---|
@@ -96,6 +101,12 @@ each record's symbol inline, in a single in-order pass:
 SELECT ts_event, instrument_id, symbol, bid_price, ask_price
 FROM read_dbn_tcbbo('OPRA.PILLAR.tcbbo.dbn.zst', symbols := true);
 ```
+
+Caveat: resolution uses **only** the `SymbolMappingMsg` records present in the
+file itself. Historical batches requested with `stype_in=continuous` (or any
+combination that doesn't force mapping records into the stream) contain none —
+`symbols := true` then yields SQL `NULL` for every row. Request the data with
+`stype_in=raw_symbol` if you need in-file resolution.
 
 The `symbol` column is `NULL` for any record whose mapping hasn't been seen yet.
 You can also read the mappings directly with `read_dbn_symbol_mapping(path)`.
