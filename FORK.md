@@ -33,7 +33,7 @@ ninja -C build/release -j2 dbn_loadable_extension shell unittest
 ./build/release/test/unittest --test-dir . 'test/*'
 ```
 
-Validation on 2026-09-18 passed all 35 SQLLogicTest files (672 assertions).
+Validation on 2026-09-18 passed all 35 SQLLogicTest files (708 assertions).
 The loadable extension also loaded into the stock `duckdb==1.5.5` Python wheel.
 On a 146,585,133-byte owned MBO day, both `databento-python==0.86.0` and
 `read_dbn_mbo` counted exactly 9,418,365 records; the DuckDB process peaked at
