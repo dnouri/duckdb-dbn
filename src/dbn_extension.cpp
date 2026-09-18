@@ -542,7 +542,7 @@ static const char *SchemaToCstr(databento::Schema s); // defined below the schem
 
 // Fail fast at bind time when a specific read_dbn_<schema>() reader is pointed
 // at a file whose metadata.schema belongs to a different schema family.
-// Files with no schema in metadata (DBN v1/v2, live or mixed-schema captures)
+// Files with no schema in metadata (for example, live or mixed-schema captures)
 // keep the permissive behavior required for explicit schema readers.
 static void VerifySchema(const std::vector<std::string> &paths, std::initializer_list<databento::Schema> allowed,
                          const char *reader) {
